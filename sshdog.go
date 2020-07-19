@@ -16,71 +16,36 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	"github.com/GeertJohan/go.rice"
-	"github.com/matir/sshdog/daemon"
+	"inu1255/sshdog/daemon"
+	"io/ioutil"
 	"os"
-	"strconv"
-	"strings"
 )
 
 type Debugger bool
 
-func (d Debugger) Debug(format string, args ...interface{}) {
-	if d {
+func (d *Debugger) Debug(format string, args ...interface{}) {
+	if *d {
 		msg := fmt.Sprintf(format, args...)
 		fmt.Fprintf(os.Stderr, "[DEBUG] %s\n", msg)
 	}
 }
 
-var dbg Debugger = true
-
-// Lookup the port number
-func getPort(box *rice.Box) int16 {
-	if len(os.Args) > 1 {
-		if port, err := strconv.Atoi(os.Args[1]); err != nil {
-			dbg.Debug("Error parsing %s as port: %v", os.Args[1], err)
-		} else {
-			return int16(port)
-		}
-	}
-	if portData, err := box.String("port"); err == nil {
-		portData = strings.TrimSpace(portData)
-		if port, err := strconv.Atoi(portData); err != nil {
-			dbg.Debug("Error parsing %s as port: %v", portData, err)
-		} else {
-			return int16(port)
-		}
-	}
-	return 2222 // default
-}
-
-// Just check if a file exists
-func fileExists(box *rice.Box, name string) bool {
-	_, err := box.Bytes(name)
-	return err == nil
-}
-
-// Should we daemonize?
-func shouldDaemonize(box *rice.Box) bool {
-	return fileExists(box, "daemon")
-}
-
-// Should we be silent?
-func beQuiet(box *rice.Box) bool {
-	return fileExists(box, "quiet")
-}
-
-var mainBox *rice.Box
+var dbg *Debugger = (*Debugger)(flag.Bool("debug", false, "enable debug"))
+var daemonMode *bool = flag.Bool("daemon", false, "enable daemon")
+var port *int = flag.Int("port", 2222, "port")
+var hostkey *string = flag.String("hostkey", "", "hostkey default random")
+var authkey *string = flag.String("authkey", "", "authkey")
 
 func main() {
-	mainBox = mustFindBox()
-
-	if beQuiet(mainBox) {
-		dbg = false
+	flag.Parse()
+	if *authkey == "" {
+		flag.Usage()
+		return
 	}
 
-	if shouldDaemonize(mainBox) {
+	if *daemonMode {
 		if err := daemon.Daemonize(daemonStart); err != nil {
 			dbg.Debug("Error daemonizing: %v", err)
 		}
@@ -92,51 +57,38 @@ func main() {
 	}
 }
 
-func mustFindBox() *rice.Box {
-	// Overloading name 'rice' due to bug in rice to be fixed in 2.0:
-	// https://github.com/GeertJohan/go.rice/issues/58
-	rice := &rice.Config{
-		LocateOrder: []rice.LocateMethod{
-			rice.LocateAppended,
-			rice.LocateEmbedded,
-			rice.LocateWorkingDirectory,
-		},
-	}
-	if box, err := rice.FindBox("config"); err != nil {
-		panic(err)
-	} else {
-		return box
-	}
-}
-
 // Actually run the implementation of the daemon
 func daemonStart() (waitFunc func(), stopFunc func()) {
 	server := NewServer()
 
-	hasHostKeys := false
-	for _, keyName := range keyNames {
-		if keyData, err := mainBox.Bytes(keyName); err == nil {
-			dbg.Debug("Adding hostkey file: %s", keyName)
-			if err = server.AddHostkey(keyData); err != nil {
-				dbg.Debug("Error adding public key: %v", err)
-			}
-			hasHostKeys = true
-		}
-	}
-	if !hasHostKeys {
+	if *hostkey == "" {
 		if err := server.RandomHostkey(); err != nil {
 			dbg.Debug("Error adding random hostkey: %v", err)
 			return
 		}
+	} else {
+		keyData, err := ioutil.ReadFile(*hostkey)
+		if err != nil {
+			dbg.Debug("Error read hostkey: %v", err)
+			return
+		}
+		dbg.Debug("Adding hostkey file: %s", *hostkey)
+		if err = server.AddHostkey(keyData); err != nil {
+			dbg.Debug("Error adding public key: %v", err)
+			return
+		}
 	}
 
-	if authData, err := mainBox.Bytes("authorized_keys"); err == nil {
-		dbg.Debug("Adding authorized_keys.")
+	if *authkey != "" {
+		authData, err := ioutil.ReadFile(*authkey)
+		if err != nil {
+			dbg.Debug("Error read hostkey: %v", err)
+			return
+		}
+		dbg.Debug("Adding authorized_keys")
 		server.AddAuthorizedKeys(authData)
-	} else {
-		dbg.Debug("No authorized keys found: %v", err)
-		return
 	}
-	server.ListenAndServe(getPort(mainBox))
+
+	server.ListenAndServe(int16(*port))
 	return server.Wait, server.Stop
 }
